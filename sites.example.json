@@ -1,0 +1,16 @@
+{
+  "intervalMinutes": 5,
+  "timeoutMs": 10000,
+  "retryDelayMs": 4000,
+  "sites": [
+    {
+      "url": "https://www.jankabes.cz/",
+      "label": "jankabes.cz"
+    },
+    {
+      "url": "https://www.rogos.eu/",
+      "label": "rogos.eu",
+      "mustContain": "Rogos"
+    }
+  ]
+}

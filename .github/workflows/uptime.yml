@@ -1,0 +1,54 @@
+name: uptime
+
+# Kontrola dostupnosti webů. Běží ve VEŘEJNÉM repu, protože standardní
+# runnery jsou tam bez limitu zdarma — v privátním repu by 5minutový
+# interval spotřeboval ~8 600 účtovaných minut měsíčně.
+#
+# Pozor na dvě vlastnosti GitHubu, se kterými se nedá nic dělat:
+#  - plánovaný běh se často zpozdí (interval je "nejméně 5 min", ne přesně),
+#  - po 60 dnech bez aktivity v repu GitHub cron uspí a pošle o tom mail.
+
+on:
+  schedule:
+    - cron: '*/5 * * * *'
+  workflow_dispatch:
+
+concurrency:
+  group: uptime
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+
+      # Stav (kdo byl naposled up/down) drží cache mezi běhy.
+      - name: Načti předchozí stav
+        uses: actions/cache/restore@v4
+        with:
+          path: .state
+          key: uptime-state-${{ github.run_id }}
+          restore-keys: |
+            uptime-state-
+
+      - name: Změř weby
+        env:
+          SITES_JSON: ${{ secrets.SITES_JSON }}
+          INGEST_URL: ${{ secrets.INGEST_URL }}
+          INGEST_TOKEN: ${{ secrets.INGEST_TOKEN }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          STATE_FILE: .state/state.json
+        run: node check.mjs
+
+      - name: Ulož stav
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: .state
+          key: uptime-state-${{ github.run_id }}
