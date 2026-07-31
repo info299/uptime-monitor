@@ -20,3 +20,18 @@ node -e '
 
 gh secret set SITES_JSON --body "$(cat sites.json)"
 echo "SITES_JSON nastaven."
+
+# Běžící smyčka si seznam načetla při startu, takže o změně neví.
+# Bez restartu by nové weby začala hlídat až za ~3 hodiny.
+RUNNING=$(gh run list --workflow=uptime.yml --status in_progress --json databaseId -q '.[].databaseId')
+if [ -n "$RUNNING" ]; then
+  for id in $RUNNING; do
+    gh run cancel "$id" >/dev/null 2>&1 && echo "Zastavuju běžící smyčku ($id), aby načetla nový seznam."
+  done
+  # Zrušení chvíli trvá; než doběhne, nový běh by se zařadil do fronty za něj.
+  for _ in $(seq 1 20); do
+    [ -z "$(gh run list --workflow=uptime.yml --status in_progress --json databaseId -q '.[].databaseId')" ] && break
+    sleep 3
+  done
+fi
+gh workflow run uptime.yml && echo "Spuštěn nový běh s aktuálním seznamem."
