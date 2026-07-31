@@ -1,12 +1,19 @@
 name: uptime
 
-# Kontrola dostupnosti webů. Běží ve VEŘEJNÉM repu, protože standardní
-# runnery jsou tam bez limitu zdarma — v privátním repu by 5minutový
-# interval spotřeboval ~8 600 účtovaných minut měsíčně.
+# Kontrola dostupnosti webů.
 #
-# Pozor na dvě vlastnosti GitHubu, se kterými se nedá nic dělat:
-#  - plánovaný běh se často zpozdí (interval je "nejméně 5 min", ne přesně),
-#  - po 60 dnech bez aktivity v repu GitHub cron uspí a pošle o tom mail.
+# POZOR na to, proč tenhle workflow vypadá takhle divně:
+# GitHub plánované běhy odkládá a část jich zahazuje. Naměřeno 30.–31. 7. 2026:
+# cron `*/5` se ve skutečnosti spustil jednou za 1–3,5 hodiny (9 běhů za 17 h
+# místo ~200). Jedno měření na jeden běh proto nestačí.
+#
+# Řešení: jeden běh měří ve smyčce ~170 minut. Souběh hlídá concurrency —
+# běžící úloha se NEruší (aby stihla uložit stav) a nový trigger čeká ve frontě,
+# takže jakmile smyčka doběhne, hned ji vystřídá další. Runnery jsou ve veřejném
+# repu zdarma, delší běh tedy nic nestojí.
+#
+# Zbylá slabina: když GitHub nespustí cron dýl než trvá smyčka, vznikne díra.
+# Dashboard ji poctivě hlásí jako „chybí N měření".
 
 on:
   schedule:
@@ -23,7 +30,10 @@ permissions:
 jobs:
   check:
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 185
+    env:
+      LOOP_MINUTES: 170
+      INTERVAL_SECONDS: 300
     steps:
       - uses: actions/checkout@v4
 
@@ -36,7 +46,7 @@ jobs:
           restore-keys: |
             uptime-state-
 
-      - name: Změř weby
+      - name: Měř ve smyčce
         env:
           SITES_JSON: ${{ secrets.SITES_JSON }}
           INGEST_URL: ${{ secrets.INGEST_URL }}
@@ -44,7 +54,35 @@ jobs:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
           STATE_FILE: .state/state.json
-        run: node check.mjs
+        run: |
+          set -u
+          END=$(( $(date +%s) + LOOP_MINUTES * 60 ))
+          FAILS=0
+          N=0
+
+          while [ "$(date +%s)" -lt "$END" ]; do
+            N=$(( N + 1 ))
+            echo "───── měření $N ($(date -u '+%H:%M:%S') UTC) ─────"
+
+            if node check.mjs; then
+              FAILS=0
+            else
+              FAILS=$(( FAILS + 1 ))
+              echo "::warning::Měření selhalo ($FAILS. v řadě)"
+              # Tři selhání po sobě = rozbitá konfigurace, ne výpadek webu.
+              # Nemá smysl točit smyčku dál, ať je chyba vidět.
+              if [ "$FAILS" -ge 3 ]; then
+                echo "::error::Tři selhání po sobě — končím, aby to nebylo skryté."
+                exit 1
+              fi
+            fi
+
+            # Poslední kolo už nečeká, ať se stihne uložit stav.
+            if [ "$(( $(date +%s) + INTERVAL_SECONDS ))" -ge "$END" ]; then break; fi
+            sleep "$INTERVAL_SECONDS"
+          done
+
+          echo "Smyčka hotová: $N měření za ${LOOP_MINUTES} min."
 
       - name: Ulož stav
         if: always()

@@ -59,9 +59,11 @@ Bez `TELEGRAM_*` se zprávy jen vypíšou do konzole, bez `INGEST_URL` se nikam 
 
 ## Co tenhle nástroj vědomě neumí
 
-- **Interval přesně 1 min.** GitHub cron má minimum 5 min a běžně se zpozdí.
-  Skutečná perioda tak kolísá; dashboard proto počítá procenta ze zapsaných měření
-  a chybějící měření hlásí zvlášť, aby 100 % nelhalo.
+- **Zaručený interval.** GitHub plánované běhy odkládá a zahazuje — naměřeno
+  30.–31. 7. 2026: cron `*/5` se spustil jednou za 1–3,5 h (9 běhů za 17 h místo ~200).
+  Proto jeden běh měří ve smyčce ~170 min a nový trigger čeká ve frontě, aby ho hned
+  vystřídal. Když GitHub nespustí cron dýl, než trvá smyčka, vznikne díra — dashboard
+  ji hlásí jako „chybí N měření", aby 100 % nelhalo.
 - **Root cause výpadku.** Umí říct HTTP status, odezvu, timeout a chybějící text.
   Nedokáže říct, proč aplikace uvnitř spadla.
 - **Po 60 dnech bez commitu** GitHub plánované workflow uspí a pošle o tom mail.
