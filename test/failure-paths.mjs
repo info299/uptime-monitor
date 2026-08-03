@@ -25,6 +25,11 @@ const server = createServer(async (req, res) => {
     res.writeHead(500, { 'Content-Type': 'text/html' });
     return res.end('<h1>Error 500</h1>');
   }
+  // Falešný příjem měření — používá ho test prahu pro hlášení zápisu.
+  if (req.url.startsWith('/ingest')) {
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    return res.end('{"ok":true,"stored":4}');
+  }
   if (mode === 'slow') {
     await new Promise((r) => setTimeout(r, 3000));
   }
@@ -128,27 +133,51 @@ assert('varování o měřiči odesláno', /Všech\s3\swebů hlásí výpadek/.t
 assert('poslal jen 1 alert, ne 3', /1 alertů/.test(r.out), r.out);
 
 // ---------------------------------------------------------------
-console.log('\n7) Selhání zápisu do dashboardu se ohlásí (ne mlčky)');
+console.log('\n7) Zápis do dashboardu: jedno selhání mlčí, tři po sobě se ohlásí');
 mode = 'ok';
-r = await new Promise((resolve) => {
-  const child = spawn(process.execPath, [CHECK], {
-    env: {
-      ...process.env,
-      SITES_JSON: config([LIVE]),
-      STATE_FILE: join(dir, 'state-ingest.json'),
-      INGEST_URL: 'http://127.0.0.1:1/ingest.php', // nikdo tam neposlouchá
-      INGEST_TOKEN: 'x',
-      TELEGRAM_BOT_TOKEN: '',
-      TELEGRAM_CHAT_ID: '',
-    },
+const ingestState = join(dir, 'state-ingest.json');
+const DEAD = 'http://127.0.0.1:1/ingest.php'; // nikdo tam neposlouchá
+const ALIVE = `${base}/ingest.php`;
+
+function runIngest(url) {
+  return new Promise((resolve) => {
+    const child = spawn(process.execPath, [CHECK], {
+      env: {
+        ...process.env,
+        SITES_JSON: config([LIVE]),
+        STATE_FILE: ingestState,
+        INGEST_URL: url,
+        INGEST_TOKEN: 'x',
+        TELEGRAM_BOT_TOKEN: '',
+        TELEGRAM_CHAT_ID: '',
+      },
+    });
+    let out = '';
+    child.stdout.on('data', (d) => (out += d));
+    child.stderr.on('data', (d) => (out += d));
+    child.on('close', (code) => resolve({ out, code }));
   });
-  let out = '';
-  child.stdout.on('data', (d) => (out += d));
-  child.stderr.on('data', (d) => (out += d));
-  child.on('close', (code) => resolve({ out, code }));
-});
-assert('alert o selhání zápisu', /Zápis do dashboardu selhal/.test(r.out), r.out);
+}
+
+r = await runIngest(DEAD);
+assert('1. selhání neposílá alert', /0 alertů/.test(r.out), r.out);
+assert('zkusil zápis podruhé', /1\. pokus selhal/.test(r.out), r.out);
 assert('měření webu proběhlo i tak', /OK\s+live-web/.test(r.out), r.out);
+
+r = await runIngest(DEAD);
+assert('2. selhání pořád mlčí', /0 alertů/.test(r.out), r.out);
+
+r = await runIngest(DEAD);
+assert('3. selhání už alertuje', /Zápis do dashboardu selhal 3× po sobě/.test(r.out), r.out);
+
+r = await runIngest(DEAD);
+assert('4. selhání znovu nespamuje', /0 alertů/.test(r.out), r.out);
+
+r = await runIngest(ALIVE);
+assert('obnovení zápisu se ohlásí', /Zápis do dashboardu zase funguje/.test(r.out), r.out);
+
+r = await runIngest(ALIVE);
+assert('po obnovení už je ticho', /0 alertů/.test(r.out), r.out);
 
 // ---------------------------------------------------------------
 console.log('\n8) Rozbitá konfigurace spadne hlasitě, ne tichým 0 webů');

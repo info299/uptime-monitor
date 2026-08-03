@@ -176,15 +176,11 @@ function duration(fromTs, toTs) {
 }
 
 // ---------- odeslání do dashboardu ----------
-async function ingest(checks) {
-  const url = process.env.INGEST_URL;
-  const token = process.env.INGEST_TOKEN;
-  if (!url || !token) {
-    console.log('[ingest] přeskočeno — chybí INGEST_URL nebo INGEST_TOKEN');
-    return { ok: false, skipped: true };
-  }
+const INGEST_TIMEOUT_MS = 25000;
+
+async function ingestOnce(url, token, checks) {
   const ac = new AbortController();
-  const timer = setTimeout(() => ac.abort(), 15000);
+  const timer = setTimeout(() => ac.abort(), INGEST_TIMEOUT_MS);
   try {
     const res = await fetch(url, {
       method: 'POST',
@@ -197,19 +193,35 @@ async function ingest(checks) {
       body: JSON.stringify({ interval: INTERVAL_MIN, checks }),
     });
     const text = (await res.text()).slice(0, 300);
-    if (!res.ok) {
-      console.error(`[ingest] HTTP ${res.status}: ${text}`);
-      return { ok: false, error: `HTTP ${res.status}` };
-    }
-    console.log(`[ingest] ok: ${text}`);
-    return { ok: true };
+    if (!res.ok) return { ok: false, error: `HTTP ${res.status}`, text };
+    return { ok: true, text };
   } catch (e) {
-    const reason = e.name === 'AbortError' ? 'timeout' : e.message;
-    console.error(`[ingest] selhalo: ${reason}`);
-    return { ok: false, error: reason };
+    return { ok: false, error: e.name === 'AbortError' ? 'timeout' : e.message };
   } finally {
     clearTimeout(timer);
   }
+}
+
+// Zápis se stejně jako měření webu potvrzuje druhým pokusem. Sdílený hosting
+// občas na pár vteřin zaškobrtne a jednorázový timeout není výpadek.
+async function ingest(checks) {
+  const url = process.env.INGEST_URL;
+  const token = process.env.INGEST_TOKEN;
+  if (!url || !token) {
+    console.log('[ingest] přeskočeno — chybí INGEST_URL nebo INGEST_TOKEN');
+    return { ok: false, skipped: true };
+  }
+
+  let r = await ingestOnce(url, token, checks);
+  if (!r.ok) {
+    console.error(`[ingest] 1. pokus selhal: ${r.error} — zkouším znovu`);
+    await sleep(3000);
+    r = await ingestOnce(url, token, checks);
+  }
+
+  if (r.ok) console.log(`[ingest] ok: ${r.text}`);
+  else console.error(`[ingest] selhalo: ${r.error}`);
+  return r;
 }
 
 // ---------- hlavní běh ----------
@@ -274,13 +286,32 @@ if (allDown) {
   state.__allDown = false;
 }
 
-if (!ingestResult.ok && !ingestResult.skipped) {
-  messages.push(
-    `📉 <b>Zápis do dashboardu selhal</b>\n` +
-      `${esc(ingestResult.error)}\n` +
-      `Měření běží dál, ale historie na /home/uptime.html se nedoplňuje.\n` +
-      `${czTime(now)}`
-  );
+// Jedno neúspěšné odeslání znamená pětiminutovou díru v historii, ne poruchu —
+// hlásí se až tři selhání po sobě, tedy čtvrt hodiny bez zápisu.
+const INGEST_ALERT_AFTER = 3;
+if (!ingestResult.skipped) {
+  const failed = state.__ingestFails || 0;
+  if (!ingestResult.ok) {
+    const streak = failed + 1;
+    state.__ingestFails = streak;
+    if (streak === INGEST_ALERT_AFTER) {
+      messages.push(
+        `📉 <b>Zápis do dashboardu selhal ${streak}× po sobě</b>\n` +
+          `${esc(ingestResult.error)}\n` +
+          `Weby se měří dál a alerty chodí, ale historie na /home/uptime.html se nedoplňuje.\n` +
+          `${czTime(now)}`
+      );
+    }
+  } else {
+    if (failed >= INGEST_ALERT_AFTER) {
+      messages.push(
+        `📈 <b>Zápis do dashboardu zase funguje</b>\n` +
+          `Nedoplněno zůstane ${failed} měření.\n` +
+          `${czTime(now)}`
+      );
+    }
+    state.__ingestFails = 0;
+  }
 }
 
 for (const m of messages) await telegram(m);
